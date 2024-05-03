@@ -1,0 +1,298 @@
+
+	\ ==================================================================================================
+	\  CONSTANTS AND COMPONENTS
+	\ ==================================================================================================
+
+	\ | KEY CONSTANTS | ---------------------------------------------------------------------------------
+			^MaxReinforcers = 500 					\ maximum number of reinforcers per session
+			^SessionLength = 80 			   		\ maximum record length (Q(0)) (min)
+			^ITI = 20
+			^ReceptacleThreshold = 10      	\ required beam-break duration (ms) to register receptacle entry/exit (Q(5))
+			^NosepokeThreshold = 10 	      \ required beam-break duration (ms) to register nosepoke entry/exit (Q(8))
+			^SyringeSize = 20						  	\ volume (mL) & internal diameter (mm) [ Henke Sass Wolf, Norm-Ject® (#4200.000V0) ]
+			^SyringeInternalDiameter = 2	  \ diameter of syringe ^Flow-Rate = 2.3063 (mL/min)
+			^RFTime = 1 ####		  					\ rise time (ms)
+			^Amplitude = 95 ####						\ amplitude of tones (dB) (note this is not actual amplitude;
+																			\ 95 dB corresponds to ~85 dB @ 4 kHz on the box floor)
+			^PulseToneFreq = 29000 ####			\ Freq of pulse (Hz)
+			^ArraySeal = -987.987			   		\ MedState Notation command for sealing arrays
+
+
+	\ | INPUTS | ----------------------------------------------------------------------------------------
+			^Receptacle = 6   \  jumper tfor this input# on smartctrl card must be SET to "LEVEL" (see smartctrl card manual)
+			^NosePoke1 = 4
+			^Nosepoke2 = 5
+
+	\ | OUTPUTS | ---------------------------------------------------------------------------------------
+			^NosePoke1Light = 7
+			^Pump = 1
+
+	\ | Z-PULSES | --------------------------------------------------------------------------------------
+			^TestOK = 11
+			^TurnToneOff = 9
+			^TurnToneOn = 10
+			^Nosepoke1Entry = 1
+			^NosePoke1Exit = 2
+			^Nosepoke2Entry = 3
+			^NosePoke2Exit = 4
+			^ReceptacleEntry = 5
+			^ReceptacleExit = 6
+			^ReinforcerDeliver = 7
+			^RewardObtain = 8
+
+  \ | VARIABLES AND ARRAYS | ---------------------------------------------------------------------------
+		\ Variable A + B = cumulative nosepoke1 entries & exits
+		\ Variable C + D = cumulative nosepoke2 entries & exits
+		\ Variable E + F = cumualtive receptacle entries & exits
+		\ Variable G + H = cumulative reward deliveries & collections
+		\ Array I + J = stores times of nosepoke1 entries & exits
+	      DIM I = 5000
+	  	  DIM J = 5000
+	 	\ Array K + L = stores times of nosepoke2 entries & exits
+	 	 	 	DIM K = 5000
+		 	 	DIM L = 5000
+	  \ Array M + N = stores times of receptacle entries & exits
+		 	 	DIM M = 8000
+			  DIM N = 8000
+		\ Array O + P = stores times of reward deliveries & collections
+		    DIM O = 1000
+			  DIM P = 1000
+		\	Array Q deals with timing:
+				\	Q(0) = the session length (s)
+				\	Q(1) = time of receptacle entry (s)
+				\	Q(2) = time to 1 sec after receptacle entry (reduced from 1 sec after early exit)
+				\	Q(3) = time to 1 sec after receptacle entry (reduced from 1 sec after early exit/re-entry)
+				\	Q(4) = counts # of clock ticks that the receptacle beam is continuously broken
+				\	Q(5) = # of clock ticks in the threshold time for detecting receptacle entries/exits (s)
+				\ Q(6) = counts # of clock ticks that Nosepoke1 beam is continuously broken
+				\ Q(7) = counts # of clock ticks that Nosepoke2 beam is continuously broken
+				\ Q(8) = number of clock ticks in the threshold time for detecting nosepoke entries/exits (s)
+				\	Q(9) = pump ON duration (s)
+				\	Q(11) = pump flow rate (mL/min)
+				\	Q(12) = session elapsed time (s)
+				\	Q(13) = sesion start time
+					DIM Q = 13
+		\ LIST R = reward volume (mL)
+					LIST R = 0.05
+		\ LIST S = reward volume equivalent pump ON duration (ms)
+					LIST S = 6919
+
+		\ Variable Y = used for sending ANL926 commands
+
+
+ \ ==============================================================================================
+ \  PRE-SESSION OPERATION VERIFICATION
+ \ ==============================================================================================
+
+	 S.S.1,\ INITIALIZE SESSION VALUES & MANUALLY TEST INPUTS/OUTPUTS  ---------------------------
+	 S1,
+		 0": SET Q(0) = ^SessionLength,
+				 Q(5) = (^ReceptacleThreshold/1000)*1",  			\ Convert time variables to MedPC clock units (seconds)
+				 Q(8) = (^NosepokeThreshold/1000)*1",
+				 Q(9) = (S(1)/1000)* 1";
+				 ~SetRack(MG,1);~; ~initANL926;~;						  \ Turn on behavior box output components
+				 SET Y = ^RFTime; ~SetRF(MG, BOX, Y);~;
+				 SET Y = ^Amplitude; ~SetAmp(MG, BOX, Y);~;
+				 ON ^HouseLight1, Nosepoke1Light ---> S2
+	 S2,
+		 #Z^Nosepoke1Entry: ON ^Pump, OFF ^Nosepoke1Light; Z^TurnToneOn ---> S3
+	 S3,
+		 Q(9)#T: OFF ^Pump; Z^TurnToneOff ---> S4
+	 S4,
+		 #Z^ReceptacleEntry: ON ^Nosepoke1Light ---> S5
+	 S5,
+		 #Z^ReceptacleExit: OFF ^Houselight1, ^Nosepoke1Light; Z^TurnToneOff; Z^TestOK ---> S6
+	 S6,
+		 0": ---> SX
+
+
+		S.S.2,\ LIVE MONITERING SESSION TIME & PERFORMANCE  ------------------------------------------
+		S1,
+			#START: Q(13) = BTIME ---> S2
+		S2
+	   	0": SET Q(12) = (BTIME-Q(13))/^1";
+					Show 1,ElapsedTime,Q(12),
+					2,NP1Entries,A, 3,NP1Exits,B, 4,NP2Entry,C, 5,NP2Exit,D,
+					6,RecepEntry,E, 7,ReceptExit,F, 8,ReinfDelivered,G, 9,ReinfCollected,H	---> SX
+
+
+ \ ==============================================================================================
+ \  STRUCTURE OF ACTIVE SESSION
+ \ ==============================================================================================
+
+		S.S.3, \ PRIMARY SESSION WORKFLOW  -----------------------------------------------------------
+		S1,
+			#Z^TestOK ---> S2																			\ House Light (CC|): signals a session is currently active
+		S2,																											\ Port Light (DS+): signals the next response will be rewarded
+			#START: ON ^Houselight1, ^Nosepoke1light ---> S3     	\ Pulse Tone (CS+): signals that reward is available to collect
+		S3,
+			#Z^Nosepoke1Entry: #Z^ReinforcerDeliver; OFF ^Nosepoke1light ---> S4
+		S4,
+			#Z^RewardObtain ! ^ITI': ON ^Nosepoke1Light ---> S5
+		S5,
+			Q(5)#T: ---> S3
+
+ \ ===============================================================================================
+ \  LEFT & RIGHT NOSEPOKE PORTS
+ \ ===============================================================================================
+
+		S.S.4,\ DETERMINING TRUE LEFT-PORT ENTRIES & EXITS  -------------------------------------------
+		S1,
+			#R^Nosepoke1: ADD Q(6);							\ If beam-break = threshold time, register entry
+	          IF Q(6)>Q(8) [@BeamBreak, @NoBeamBreak]
+	              @BeamBreak: SET Q(6)=0; Z^Nosepoke1Entry ---> S2
+	              @NoBeamBreak: ---> SX
+			Q(8)#T: SET Q(6)=0 ---> S1
+		S2,
+			#R^Nosepoke1: ---> S2              	\ ReSET clock if beam is continuously broken
+			Q(8)#T: Z^Nosepoke1Exit ---> S1   	]
+
+
+		S.S.5,\ DETERMINING TRUE RIGHT-PORT ENTRIES & EXITS  -------------------------------------------
+	 	S1,
+	 		#R^Nosepoke2: ADD Q(7);
+	          IF Q(7)>Q(8) [@BeamBreak, @NoBeamBreak]
+	              @BeamBreak: SET Q(7)=0; Z^Nosepoke2Entry ---> S2
+	              @NoBeamBreak: ---> SX
+	 		Q(8)#T: SET Q(7)=0 ---> S1
+	 	S2,
+	 		#R^Nosepoke2: ---> S2
+	 		Q(8)#T: Z^Nosepoke2Exit ---> S1
+
+
+		S.S.6,\ RECORDING TIMESTAMPS FOR PORT ENTRIES & EXITS  -----------------------------------------
+		S1,
+			#Z^TestOK ---> S2
+		S2,
+			#START ---> S3
+		S3,
+			#Z^Nosepoke1Entry: ADD A; SET I(A-1) = Q(12), I(A)) = ^ArraySeal;
+						IF A >= 5000 [@Stop,@SealArray]
+								@Stop: SET Q(0) = Q(12) ---> StopAbortFlush
+								@SealArray: ---> SX
+			#Z^Nosepoke1Exit: ADD B; SET J(B-1) = Q(12), J(B)) = ^ArraySeal;
+						IF B >= 5000 [@Stop,@SealArray]
+								@Stop: SET Q(0) = Q(12) ---> StopAbortFlush
+								@SealArray: ---> SX
+			#Z^Nosepoke2Entry: ADD C; SET K(C-1) = Q(12), K(C)) = ^ArraySeal;
+						IF C >= 5000 [@Stop,@SealArray]
+								@Stop: SET Q(0) = Q(12) ---> StopAbortFlush
+								@SealArray: ---> SX
+			#Z^Nosepoke2Exit: ADD D; SET L(D-1) = Q(12), L(D)) = ^ArraySeal;
+						IF D >= 5000 [@Stop,@SealArray]
+								@Stop: SET Q(0) = Q(12) ---> StopAbortFlush
+								@SealArray: ---> SX
+
+
+ \ =============================================================================================
+ \  LIQUID RECEPTACLE PORT
+ \ =============================================================================================
+
+		S.S.7,\ DETERMINING TRUE PORT ENTRIES & EXITS  ---------------------------------------------
+		S1,
+			#R^Receptacle: ADD Q(4);
+						IF Q(4)>Q(5) [@BeamBreak, @NoBeamBreak]
+								@BeamBreak: SET Q(5) = 0; Z^ReceptacleEntry ---> S2
+								@NoBeamBreak: ---> SX
+			Q(5)#T: SET Q(5)=0 ---> S1
+		S2,
+			#R^Receptacle: ---> S2
+			Q(5)#T: Z^ReceptacleExit ---> S1
+
+
+		S.S.8,\ RECORDING TIMESTAMPS FOR ENTRIES & EXITS  --------------------------------------------
+		S1,
+			#Z^TestOK ---> S2
+		S2,
+			#START ---> S3
+		S3,
+			#Z^ReceptacleEntry: ADD E; SET M(E-1) = Q(12);
+					IF E >= 8000 [@Stop, @Continue]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET M(E)= ^ArraySeal ---> S4
+			#Z^ReceptacleExit: ADD F; SET N(F-1) = Q(12); ADD E; SET M(E-1) = 0; SET M(E) = ^ArraySeal;
+					IF F >= 8000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET N(F)= ^ArraySeal ---> S3   \ A receptacle entry was skipped, so SET its time to 0
+		S4,
+			#Z^ReceptacleExit: ADD N; SET N(F-1) = Q(12);
+					IF F >= 8000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET N(F)= ^ArraySeal ---> S3
+			#Z^ReceptacleEntry: ADD E; SET M(E-1) = Q(12); ADD F; SET N(F-1) = 0; SET N(F) = ^ArraySeal;
+					IF E >= 8000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET M(E)= ^ArraySeal ---> S4    \ A receptacle exit was skipped, so SET its time to 0
+
+
+ \ =================================================================================================
+ \  REWARD REINFORCEMENT
+ \ =================================================================================================
+
+		S.S.9,\ INITIATING AND RECORDING TIMESTAMPS FOR REWARD DELIVERY  -------------------------------
+		S1,
+			#Z^TestOK ---> S2
+		S2,
+			#START ---> S3
+		S3,
+			#Z^ReinforcerDeliver: ON ^Pump; ---> S4
+		S4,
+			Q(9)#T: OFF ^Pump; ADD G; SET O(G-1) = Q(12);						\ Record time of reward delivery
+					IF G >= 1000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET O(G)= ^ArraySeal ---> S3
+
+
+		S.S.10,\ RECORDING TIMESTAMPS FOR REWARD COLLECTION  ---------------------------------------------
+		S1,
+			#Z^TestOK: ---> S2
+		S2,
+			#START ---> S3
+		S3,
+			#Z^ReinforcerDeliver: ---> S4
+		S4,
+			Q(3)#T: ---> S5
+			#Z^ReceptacleExit: SET Q(2) = 1" - (Q(12) - Q(1))*1" ---> S6 		\ Q(2) = time until 1 second has elapsed after entry
+		S5,
+			#Z^ReceptacleExit: Z^RewardObtain; ADD H; SET P(H-1) = Q(12);
+					IF H >= 1000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET P(H)= ^ArraySeal ---> S3
+		S6,
+			Q(2)#T: Z^RewardObtain; ADD H; SET P(H-1) = Q(12);
+					IF H >= 1000 [@Stop, @SealArray]
+							@Stop: ---> StopAbortFlush
+							@SealArray: SET P(H)= ^ArraySeal ---> S3
+			#Z^ReceptacleEntry: SET Q(3) = 1" - (Q(12) - Q(1))*1" ---> S6	 	\	Q(3) is reduced by the time since the first entry
+
+
+ \ ================================================================================================
+ \  SOUND STIMULUS
+ \ ================================================================================================
+
+		S.S.11,\ COMMANDS FOR TOGGLING TONE PULSES ON & OFF  ------------------------------------------
+		S1,
+			#Z^TurnToneOn: SET Y = ^PulseToneFreq; ~OnFreq(MG, BOX, Y);~; ---> S2
+		S2,
+			Q(13)#T: ~ToneOff(MG, BOX);~; ---> s3
+			#Z^TurnToneOff: ~ToneOff(MG, BOX);~; SET M = 0 ---> S1
+
+
+ \ ==================================================================================================
+ \  CONCLUDING SESSION
+ \ ==================================================================================================
+
+		S.S.13,\ TURN OFF EQUIPMENT AND SAVE DATA  ------------------------------------------------------
+		S1,
+			#Z^TestOK ---> S2
+		S2,
+			#START ---> S3
+		S3,
+			^MaxReinforcers # Z^RewardObtain ! ^SessionLength':    		 \ when MaxReinforcers or SessionLength reached
+					Z^TurnToneOff; OFF ^HouseLight1, ^Nosepoke1Light;  		 \ turn off behavior box output componenents
+					SET Q(0) = Q(12),																			 \ SET session length
+					I(A) =  ^ArraySeal, J(B) =  ^ArraySeal, 							 \ Nosepoke1 Entry + Exit Arrays
+					K(C) =  ^ArraySeal, L(D) =  ^ArraySeal,					   		 \ Nosepoke2 Entry + Exit Arrays
+					M(E) =  ^ArraySeal,	N(F) =  ^ArraySeal, 							 \ Receptacle Entry + Exit Arrays
+					G(O) =  ^ArraySeal,	H(P) =  ^ArraySeal  							 \ Reward Delivery + Collection Arrays
+					---> StopAbortFlush					 \ Seal arrays and end session
